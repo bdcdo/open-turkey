@@ -1,0 +1,30 @@
+# Arquivo de unidade systemd para o Open Turkey
+# Este servico gerencia o daemon do bloqueador de produtividade
+
+[Unit]
+# Descricao do servico exibida em comandos como 'systemctl status'
+Description=Open Turkey - Bloqueador de Produtividade
+# Link para a documentacao oficial do projeto
+Documentation=https://github.com/brunodcdo/open-turkey
+# Garante que o servico so inicia apos a rede estar disponivel
+After=network.target
+
+[Service]
+# Tipo 'simple': o processo principal e o proprio ExecStart
+Type=simple
+# Comando para iniciar o daemon do Open Turkey
+# Usa o binario real (open-turkey-bin), nao o wrapper script,
+# pois o systemd ja executa como root — nao precisa de sudo
+ExecStart=/usr/local/bin/open-turkey-bin daemon
+# Reinicia automaticamente o servico em caso de falha
+Restart=always
+# Aguarda 5 segundos antes de reiniciar o servico
+RestartSec=5
+# Redireciona a saida padrao para o journal do systemd
+StandardOutput=journal
+# Redireciona a saida de erro para o journal do systemd
+StandardError=journal
+
+[Install]
+# Inicia o servico automaticamente no modo multi-usuario (boot normal)
+WantedBy=multi-user.target
