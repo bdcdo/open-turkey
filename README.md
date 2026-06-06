@@ -1,117 +1,152 @@
 # Open Turkey
 
-Bloqueador de produtividade para Linux via linha de comando (CLI) + serviço `systemd`.
+A command-line productivity blocker for Linux, backed by a `systemd` service.
 
-O Open Turkey organiza o bloqueio em **blocos** (grupos nomeados) de:
-- **Sites** (domínios, ex: `youtube.com`)
-- **Apps** (nomes de processos, ex: `discord`, `telegram-desktop`)
+Open Turkey is an open-source, Linux-native alternative to [Cold Turkey](https://getcoldturkey.com/): it blocks distracting websites and applications and keeps them blocked, even against your own attempts to undo it on impulse. Where Cold Turkey is paid and centered on Windows/macOS, Open Turkey is free, built in Go, and designed around the way Linux actually enforces policy.
 
-Quando você **ativa** um bloco, o daemon garante continuamente que as camadas de bloqueio estejam aplicadas.
+It organizes blocking into **blocks** — named groups of:
 
-## Instalação
+- **Sites** (domains, e.g. `youtube.com`)
+- **Apps** (process names, e.g. `discord`, `telegram-desktop`)
 
-Pré-requisitos:
-- Linux com `systemd`
-- `iptables` disponível
+When you **activate** a block, a daemon continuously ensures the blocking layers stay applied.
 
-Instalação (recomendado):
+## How it works — 4 enforcement layers
+
+Open Turkey doesn't rely on a single, easily-bypassed mechanism. Each active block is enforced on four independent layers, and a `systemd` daemon re-applies them every 5 seconds if anything is tampered with:
+
+1. **`/etc/hosts`** — resolves blocked domains to `0.0.0.0` (affects every program, not just browsers).
+2. **Firewall (iptables)** — blocks network connections to the blocked sites.
+3. **Browser enterprise policies** — managed `URLBlocklist`/`WebsiteFilter` policies for Firefox, Chromium and Google Chrome. The user cannot disable these from inside the browser, not even in private/incognito mode.
+4. **Process kill** — terminates blocked apps that are running (SIGKILL).
+
+Because the hosts and firewall layers act below the browser, blocking works even for browsers installed via Snap or Flatpak (where the system-wide browser policy file may not be read).
+
+## Installation
+
+Prerequisites:
+
+- Linux with `systemd`
+- `iptables` available
+- Go (to build), at `/usr/local/go/bin` or otherwise on your `PATH`
+
+Recommended:
+
 ```bash
 sudo ./install.sh
 ```
 
-Isso:
-- compila o binário
-- instala `open-turkey` (wrapper) e `open-turkey-bin` (binário real) em `/usr/local/bin`
-- cria a regra em `/etc/sudoers.d/open-turkey` para rodar sem senha
-- instala e inicia o serviço `systemd` `open-turkey.service`
-- cria o banco em `/var/lib/open-turkey/open-turkey.db`
+This:
 
-## Conceitos
+- compiles the binary (`CGO_ENABLED=0`, pure-Go SQLite via `modernc.org/sqlite`)
+- installs `open-turkey` (a wrapper) and `open-turkey-bin` (the real binary) into `/usr/local/bin`
+- adds a rule in `/etc/sudoers.d/open-turkey` so it runs without a password prompt
+- installs and starts the `systemd` service `open-turkey.service`
+- creates the database at `/var/lib/open-turkey/open-turkey.db`
 
-- **Bloco**: conjunto de sites/apps que você quer bloquear junto.
-- **Ativo**: bloco em vigor (o sistema está bloqueando).
-- **Trava (`--lock`)**: quando ativado, impede desativação com `stop`. O único jeito de desativar é `unlock` (desafio de digitação).
+The installed program is independent of the source directory — once installed, you can remove the project folder and it keeps working.
 
-## Comandos principais
+## Concepts
 
-### 1) Criar e configurar um bloco
+- **Block**: a set of sites/apps you want to block together.
+- **Active**: a block that is currently in effect (the system is enforcing it).
+- **Lock (`--lock`)**: when enabled, prevents deactivation via `stop`. The only way to deactivate a locked block is `unlock`, which requires completing a typing challenge — deliberate friction to outlast an impulse.
+
+## Commands
+
+### 1) Create and configure a block
 
 ```bash
-open-turkey block create redes-sociais
-open-turkey block add-site redes-sociais instagram.com x.com facebook.com
-open-turkey block add-app  redes-sociais discord telegram
+open-turkey block create social-media
+open-turkey block add-site social-media instagram.com x.com facebook.com
+open-turkey block add-app  social-media discord telegram
 ```
 
-Ver detalhes:
+Show details:
+
 ```bash
-open-turkey block info redes-sociais
+open-turkey block info social-media
 ```
 
-Listar todos os blocos:
+List all blocks:
+
 ```bash
 open-turkey block list
 ```
 
-### 2) Ativar / desativar
+### 2) Activate / deactivate
 
-Ativar:
+Activate:
+
 ```bash
-open-turkey start redes-sociais
+open-turkey start social-media
 ```
 
-Ativar com trava:
+Activate with a lock:
+
 ```bash
-open-turkey start redes-sociais --lock
+open-turkey start social-media --lock
 ```
 
-Ver status:
+Show status:
+
 ```bash
 open-turkey status
 ```
 
-Desativar (se não estiver travado):
+Deactivate (only if not locked):
+
 ```bash
-open-turkey stop redes-sociais
+open-turkey stop social-media
 ```
 
-Desbloquear um bloco travado (isso **desativa** o bloco):
+Unlock a locked block (this also **deactivates** it):
+
 ```bash
-open-turkey unlock redes-sociais
+open-turkey unlock social-media
 ```
 
-### 3) Como remover um site da lista de links bloqueados
+### 3) Editing a block's lists
 
-Para remover um domínio de um bloco:
+Remove a domain from a block:
+
 ```bash
-open-turkey block remove-site redes-sociais instagram.com
+open-turkey block remove-site social-media instagram.com
 ```
 
-Notas importantes:
-- Se o bloco estiver **ativo**, o Open Turkey reaplica as camadas para o desbloqueio ter efeito imediatamente.
-- Se o bloco estiver **ativo e travado**, você **não consegue** remover sites/apps dele. Primeiro faça `open-turkey unlock <bloco>` (que desativa), depois ajuste e por fim ative novamente.
+Notes:
 
-Remover um app (processo) de um bloco:
+- If the block is **active**, Open Turkey re-applies the layers so the change takes effect immediately.
+- If the block is **active and locked**, you **cannot** edit its sites/apps. Run `open-turkey unlock <block>` first (which deactivates it), make your changes, then activate again.
+
+Remove an app (process) from a block:
+
 ```bash
-open-turkey block remove-app redes-sociais discord
+open-turkey block remove-app social-media discord
 ```
 
-Remover um bloco inteiro (precisa estar inativo):
+Remove an entire block (must be inactive):
+
 ```bash
-open-turkey block remove redes-sociais
+open-turkey block remove social-media
 ```
 
-## Serviço (daemon) e logs
+## Service (daemon) and logs
 
-O daemon é gerenciado por `systemd`:
+The daemon is managed by `systemd`:
+
 ```bash
 systemctl status open-turkey
 systemctl restart open-turkey
 journalctl -u open-turkey -f
 ```
 
-## Desinstalação
+## Uninstall
 
 ```bash
 sudo make uninstall
 ```
 
+## License
+
+MIT — see [LICENSE](LICENSE).
