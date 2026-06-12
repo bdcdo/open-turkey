@@ -2,10 +2,10 @@
 //
 // Este arquivo implementa os comandos que controlam o CICLO DE VIDA de um bloco:
 //
-//   open-turkey start <bloco>   → Ativa um bloco (começa a bloquear sites/apps)
-//   open-turkey stop <bloco>    → Desativa um bloco (para de bloquear)
-//   open-turkey unlock <bloco>  → Desbloqueia um bloco travado via desafio de digitação
-//   open-turkey status          → Mostra o status de todos os blocos
+//	open-turkey start <bloco>   → Ativa um bloco (começa a bloquear sites/apps)
+//	open-turkey stop <bloco>    → Desativa um bloco (para de bloquear)
+//	open-turkey unlock <bloco>  → Desbloqueia um bloco travado via desafio de digitação
+//	open-turkey status          → Mostra o status de todos os blocos
 //
 // COMO FUNCIONA A ATIVAÇÃO DE UM BLOCO?
 // -------------------------------------
@@ -36,9 +36,10 @@ package cli
 import (
 	"fmt"
 	"os"
+	"time"
 
-	"github.com/brunodcdo/open-turkey/internal/blocker"
 	"github.com/brunodcdo/open-turkey/internal/db"
+	"github.com/brunodcdo/open-turkey/internal/enforcer"
 	"github.com/brunodcdo/open-turkey/internal/lock"
 	"github.com/spf13/cobra"
 )
@@ -52,15 +53,17 @@ import (
 // Uso: open-turkey start <nome-do-bloco> [--lock] [--lock-chars N]
 //
 // Exemplos:
-//   open-turkey start redes-sociais              → ativa sem trava
-//   open-turkey start redes-sociais --lock       → ativa com trava (300 chars padrão)
-//   open-turkey start redes-sociais --lock --lock-chars 500  → trava com 500 chars
+//
+//	open-turkey start redes-sociais              → ativa sem trava
+//	open-turkey start redes-sociais --lock       → ativa com trava (300 chars padrão)
+//	open-turkey start redes-sociais --lock --lock-chars 500  → trava com 500 chars
 //
 // Flags:
-//   --lock         Trava o bloco para que não possa ser desativado com "stop".
-//                  O usuário precisará usar "unlock" com desafio de digitação.
-//   --lock-chars   Quantidade de caracteres aleatórios do desafio de desbloqueio.
-//                  Padrão: 300. Quanto mais, mais difícil de desbloquear.
+//
+//	--lock         Trava o bloco para que não possa ser desativado com "stop".
+//	               O usuário precisará usar "unlock" com desafio de digitação.
+//	--lock-chars   Quantidade de caracteres aleatórios do desafio de desbloqueio.
+//	               Padrão: 300. Quanto mais, mais difícil de desbloquear.
 var startCmd = &cobra.Command{
 	Use:   "start [bloco]",
 	Short: "Ativar um bloco de bloqueio",
@@ -127,49 +130,12 @@ var startCmd = &cobra.Command{
 			return err
 		}
 
-		// --- Passo 5: Coletar TODOS os domínios e apps de TODOS os blocos ativos ---
-		// Precisamos de todos os domínios porque as camadas de bloqueio são globais.
-		// Se o bloco "redes-sociais" bloqueia facebook.com e o bloco "jogos" bloqueia
-		// steam.com, precisamos aplicar AMBOS no /etc/hosts, firewall, etc.
-		dominios, err := database.GetAllBlockedDomains()
-		if err != nil {
-			return fmt.Errorf("erro ao buscar domínios bloqueados: %w", err)
+		// --- Passo 5: Aplicar bloqueio ou tracking conforme o limite diário ---
+		if err := reaplicarOuRemoverCamadas(database); err != nil {
+			return err
 		}
 
-		apps, err := database.GetAllBlockedApps()
-		if err != nil {
-			return fmt.Errorf("erro ao buscar apps bloqueados: %w", err)
-		}
-
-		// --- Passo 6: Aplicar as 4 camadas de bloqueio ---
-		// Cada camada é um mecanismo diferente de bloqueio que funciona
-		// independentemente dos outros. Juntas, tornam muito difícil burlar.
-
-		// Camada 1: /etc/hosts — redireciona domínios para 0.0.0.0 (IP inválido).
-		// É a primeira linha de defesa e afeta TODOS os programas do sistema.
-		if err := blocker.ApplyHosts(dominios); err != nil {
-			return fmt.Errorf("erro ao aplicar bloqueio no /etc/hosts: %w", err)
-		}
-
-		// Camada 2: iptables (firewall) — bloqueia pacotes de rede para os IPs dos sites.
-		// Funciona mesmo se o usuário encontrar o IP real e tentar acessar diretamente.
-		if err := blocker.ApplyFirewall(dominios); err != nil {
-			return fmt.Errorf("erro ao aplicar bloqueio no firewall: %w", err)
-		}
-
-		// Camada 3: Políticas de navegador — bloqueia diretamente no Firefox/Chrome/Chromium.
-		// O navegador mostra uma página "Bloqueado pela política da organização".
-		if err := blocker.ApplyBrowserPolicies(dominios); err != nil {
-			return fmt.Errorf("erro ao aplicar políticas de navegador: %w", err)
-		}
-
-		// Camada 4: Matar processos — encerra apps bloqueados que estejam rodando.
-		// Usa SIGKILL (sinal 9) para garantir que o processo morra imediatamente.
-		if len(apps) > 0 {
-			blocker.KillBlocked(apps)
-		}
-
-		// --- Passo 7: Mensagem de sucesso ---
+		// --- Passo 6: Mensagem de sucesso ---
 		// Informamos se o bloco foi ativado com ou sem trava.
 		if usarTrava {
 			fmt.Printf("Bloco '%s' ativado com sucesso [TRAVADO - %d chars para desbloquear]\n", nomeBLoco, lockChars)
@@ -355,16 +321,16 @@ var unlockCmd = &cobra.Command{
 //
 // Exemplo de saída:
 //
-//   === Status do Open Turkey ===
+//	=== Status do Open Turkey ===
 //
-//   Blocos ativos:
-//     redes-sociais [TRAVADO - 300 chars]
-//     jogos
+//	Blocos ativos:
+//	  redes-sociais [TRAVADO - 300 chars]
+//	  jogos
 //
-//   Blocos inativos:
-//     trabalho
+//	Blocos inativos:
+//	  trabalho
 //
-//   Total: 3 blocos (2 ativos, 1 inativo)
+//	Total: 3 blocos (2 ativos, 1 inativo)
 //
 // Este comando é útil para ter uma visão geral rápida sem precisar
 // inspecionar cada bloco individualmente.
@@ -401,6 +367,7 @@ var statusCmd = &cobra.Command{
 		// Cada bloco ativo vira uma string formatada com ou sem "[TRAVADO]".
 		var blocosAtivos []string
 		var blocosInativos []string
+		day := currentDayKey()
 
 		for _, bloco := range blocos {
 			// GetBlock retorna detalhes completos incluindo Active, Locked, LockChars.
@@ -408,14 +375,30 @@ var statusCmd = &cobra.Command{
 			if err != nil {
 				return err
 			}
+			limitStatus, err := database.GetLimitStatus(bloco.Name, day)
+			if err != nil {
+				return err
+			}
 
 			if detalhe.Active {
 				// Se está ativo, formatamos com informação de trava (se houver).
+				suffix := ""
 				if detalhe.Locked {
-					blocosAtivos = append(blocosAtivos, fmt.Sprintf("  %s [TRAVADO - %d chars]", detalhe.Name, detalhe.LockChars))
-				} else {
-					blocosAtivos = append(blocosAtivos, fmt.Sprintf("  %s", detalhe.Name))
+					suffix += fmt.Sprintf(" [TRAVADO - %d chars]", detalhe.LockChars)
 				}
+				if limitStatus.HasDailyLimit {
+					used := limitStatus.UsedSecondsToday
+					if used > limitStatus.DailyLimitSeconds {
+						used = limitStatus.DailyLimitSeconds
+					}
+					remaining := limitStatus.DailyLimitSeconds - used
+					if remaining <= 0 {
+						suffix += " [LIMITE ESGOTADO]"
+					} else {
+						suffix += fmt.Sprintf(" [LIMITE %s/%s]", formatSeconds(used), formatSeconds(limitStatus.DailyLimitSeconds))
+					}
+				}
+				blocosAtivos = append(blocosAtivos, fmt.Sprintf("  %s%s", detalhe.Name, suffix))
 			} else {
 				blocosInativos = append(blocosInativos, fmt.Sprintf("  %s", detalhe.Name))
 			}
@@ -463,77 +446,11 @@ var statusCmd = &cobra.Command{
 // Funções auxiliares
 // ============================================================================
 
-// reaplicarOuRemoverCamadas atualiza as camadas de bloqueio após uma desativação.
-//
-// Esta função centraliza a lógica comum entre stopCmd e unlockCmd:
-// após desativar um bloco, precisamos decidir se reaplicamos as camadas
-// com os domínios restantes ou se removemos tudo.
-//
-// Dois cenários possíveis:
-//
-//  1. Ainda existem blocos ativos: reaplicamos todas as 4 camadas com os
-//     domínios/apps dos blocos que permaneceram ativos. Isso garante que
-//     os outros bloqueios continuem funcionando.
-//
-//  2. Nenhum bloco ativo restante: removemos todas as camadas completamente.
-//     O sistema volta ao estado "livre" — nenhum site ou app bloqueado.
+// reaplicarOuRemoverCamadas atualiza bloqueios e tracking após mudanças na CLI.
+// Blocos sem limite ou com cota esgotada são bloqueados; blocos limitados com
+// saldo restante ficam disponíveis e monitorados por regras de contagem.
 func reaplicarOuRemoverCamadas(database *db.DB) error {
-	// Buscamos os domínios e apps restantes (dos blocos que ainda estão ativos).
-	dominios, err := database.GetAllBlockedDomains()
-	if err != nil {
-		return fmt.Errorf("erro ao buscar domínios bloqueados restantes: %w", err)
-	}
-
-	apps, err := database.GetAllBlockedApps()
-	if err != nil {
-		return fmt.Errorf("erro ao buscar apps bloqueados restantes: %w", err)
-	}
-
-	// Buscamos os blocos ativos para saber se ainda há algum.
-	blocosAtivos, err := database.GetActiveBlocks()
-	if err != nil {
-		return fmt.Errorf("erro ao buscar blocos ativos: %w", err)
-	}
-
-	if len(blocosAtivos) > 0 {
-		// Cenário 1: Ainda há blocos ativos — reaplicar todas as camadas.
-		// Recriamos tudo do zero com os domínios restantes para garantir
-		// consistência. É mais seguro que tentar remover domínios individualmente.
-
-		if err := blocker.ApplyHosts(dominios); err != nil {
-			return fmt.Errorf("erro ao reaplicar bloqueio no /etc/hosts: %w", err)
-		}
-
-		if err := blocker.ApplyFirewall(dominios); err != nil {
-			return fmt.Errorf("erro ao reaplicar bloqueio no firewall: %w", err)
-		}
-
-		if err := blocker.ApplyBrowserPolicies(dominios); err != nil {
-			return fmt.Errorf("erro ao reaplicar políticas de navegador: %w", err)
-		}
-
-		// Matar processos dos blocos que ainda estão ativos.
-		if len(apps) > 0 {
-			blocker.KillBlocked(apps)
-		}
-	} else {
-		// Cenário 2: Nenhum bloco ativo — remover todas as camadas.
-		// O sistema volta ao estado "limpo" — sem bloqueios.
-
-		if err := blocker.RemoveHosts(); err != nil {
-			return fmt.Errorf("erro ao remover bloqueio do /etc/hosts: %w", err)
-		}
-
-		if err := blocker.RemoveFirewall(); err != nil {
-			return fmt.Errorf("erro ao remover bloqueio do firewall: %w", err)
-		}
-
-		if err := blocker.RemoveBrowserPolicies(); err != nil {
-			return fmt.Errorf("erro ao remover políticas de navegador: %w", err)
-		}
-	}
-
-	return nil
+	return enforcer.Apply(database, time.Now())
 }
 
 // ============================================================================
@@ -543,10 +460,11 @@ func reaplicarOuRemoverCamadas(database *db.DB) error {
 // init() é chamada automaticamente pelo Go quando o pacote é importado.
 // Aqui registramos nossos comandos como filhos do rootCmd (comando raiz),
 // tornando-os disponíveis como subcomandos:
-//   open-turkey start ...
-//   open-turkey stop ...
-//   open-turkey unlock ...
-//   open-turkey status
+//
+//	open-turkey start ...
+//	open-turkey stop ...
+//	open-turkey unlock ...
+//	open-turkey status
 //
 // Também configuramos as flags do startCmd aqui, pois o Cobra exige que
 // as flags sejam registradas antes da execução do comando.

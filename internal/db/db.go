@@ -58,11 +58,26 @@ type BlockDetail struct {
 // ActiveBlockDetail representa um bloco que está ativo no momento.
 // É usado pelo daemon para saber o que bloquear.
 type ActiveBlockDetail struct {
-	BlockName string
-	Sites     []string
-	Apps      []string
-	Locked    bool
-	LockChars int
+	ID                int
+	BlockName         string
+	Sites             []string
+	Apps              []string
+	Locked            bool
+	LockChars         int
+	HasDailyLimit     bool
+	DailyLimitSeconds int
+	UsedSecondsToday  int
+}
+
+// LimitStatus resume a configuração e o consumo de limite diário de um bloco.
+type LimitStatus struct {
+	BlockID           int
+	BlockName         string
+	Active            bool
+	Locked            bool
+	HasDailyLimit     bool
+	DailyLimitSeconds int
+	UsedSecondsToday  int
 }
 
 // --------------------------------------------------------------------------
@@ -110,6 +125,25 @@ CREATE TABLE IF NOT EXISTS active_blocks (
     locked       BOOLEAN NOT NULL DEFAULT 0,
     lock_chars   INTEGER NOT NULL DEFAULT 0,
     activated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (block_id) REFERENCES blocks(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS daily_limits (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    block_id      INTEGER UNIQUE NOT NULL,
+    daily_seconds INTEGER NOT NULL,
+    created_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (block_id) REFERENCES blocks(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS daily_usage (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    block_id     INTEGER NOT NULL,
+    day          TEXT NOT NULL,
+    used_seconds INTEGER NOT NULL DEFAULT 0,
+    updated_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(block_id, day),
     FOREIGN KEY (block_id) REFERENCES blocks(id) ON DELETE CASCADE
 );
 `
@@ -572,14 +606,22 @@ func (d *DB) IsBlockLocked(name string) (bool, error) {
 // Consultas para o daemon (bloqueios ativos)
 // --------------------------------------------------------------------------
 
-// GetActiveBlocks retorna todos os blocos ativos com seus sites e apps.
+// GetActiveBlocks retorna todos os blocos ativos com seus sites, apps e limite diário.
 // O daemon usa isso para saber o que bloquear.
-func (d *DB) GetActiveBlocks() ([]ActiveBlockDetail, error) {
+func (d *DB) GetActiveBlocks(day string) ([]ActiveBlockDetail, error) {
 	rows, err := d.conn.Query(`
-		SELECT b.id, b.name, ab.locked, ab.lock_chars
+		SELECT
+			b.id,
+			b.name,
+			ab.locked,
+			ab.lock_chars,
+			COALESCE(dl.daily_seconds, 0),
+			COALESCE(du.used_seconds, 0)
 		FROM active_blocks ab
 		JOIN blocks b ON b.id = ab.block_id
-	`)
+		LEFT JOIN daily_limits dl ON dl.block_id = b.id
+		LEFT JOIN daily_usage du ON du.block_id = b.id AND du.day = ?
+	`, day)
 	if err != nil {
 		return nil, fmt.Errorf("erro ao buscar blocos ativos: %w", err)
 	}
@@ -587,20 +629,27 @@ func (d *DB) GetActiveBlocks() ([]ActiveBlockDetail, error) {
 
 	var activeBlocks []ActiveBlockDetail
 	for rows.Next() {
-		var blockID int
 		var abd ActiveBlockDetail
 
-		if err := rows.Scan(&blockID, &abd.BlockName, &abd.Locked, &abd.LockChars); err != nil {
+		if err := rows.Scan(
+			&abd.ID,
+			&abd.BlockName,
+			&abd.Locked,
+			&abd.LockChars,
+			&abd.DailyLimitSeconds,
+			&abd.UsedSecondsToday,
+		); err != nil {
 			return nil, fmt.Errorf("erro ao ler bloco ativo: %w", err)
 		}
+		abd.HasDailyLimit = abd.DailyLimitSeconds > 0
 
 		// Para cada bloco ativo, buscamos seus sites e apps.
-		abd.Sites, err = d.getBlockSites(blockID)
+		abd.Sites, err = d.getBlockSites(abd.ID)
 		if err != nil {
 			return nil, err
 		}
 
-		abd.Apps, err = d.getBlockApps(blockID)
+		abd.Apps, err = d.getBlockApps(abd.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -613,6 +662,152 @@ func (d *DB) GetActiveBlocks() ([]ActiveBlockDetail, error) {
 	}
 
 	return activeBlocks, nil
+}
+
+// SetDailyLimit configura ou atualiza a cota diária de um bloco.
+func (d *DB) SetDailyLimit(blockName string, dailySeconds int) error {
+	if dailySeconds <= 0 {
+		return fmt.Errorf("limite diário deve ser maior que zero")
+	}
+
+	blockID, err := d.getBlockID(blockName)
+	if err != nil {
+		return err
+	}
+
+	_, err = d.conn.Exec(`
+		INSERT INTO daily_limits (block_id, daily_seconds)
+		VALUES (?, ?)
+		ON CONFLICT(block_id) DO UPDATE SET
+			daily_seconds = excluded.daily_seconds,
+			updated_at = CURRENT_TIMESTAMP
+	`, blockID, dailySeconds)
+	if err != nil {
+		return fmt.Errorf("erro ao configurar limite diário do bloco '%s': %w", blockName, err)
+	}
+	return nil
+}
+
+// RemoveDailyLimit remove a configuração de limite diário de um bloco.
+func (d *DB) RemoveDailyLimit(blockName string) error {
+	blockID, err := d.getBlockID(blockName)
+	if err != nil {
+		return err
+	}
+
+	result, err := d.conn.Exec("DELETE FROM daily_limits WHERE block_id = ?", blockID)
+	if err != nil {
+		return fmt.Errorf("erro ao remover limite diário do bloco '%s': %w", blockName, err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("erro ao verificar remoção do limite diário do bloco '%s': %w", blockName, err)
+	}
+	if rowsAffected == 0 {
+		return fmt.Errorf("bloco '%s' não tem limite diário configurado", blockName)
+	}
+
+	return nil
+}
+
+// AddDailyUsage soma segundos ao consumo de um bloco em um dia local.
+func (d *DB) AddDailyUsage(blockID int, day string, seconds int) error {
+	if seconds <= 0 {
+		return nil
+	}
+
+	_, err := d.conn.Exec(`
+		INSERT INTO daily_usage (block_id, day, used_seconds)
+		VALUES (?, ?, ?)
+		ON CONFLICT(block_id, day) DO UPDATE SET
+			used_seconds = used_seconds + excluded.used_seconds,
+			updated_at = CURRENT_TIMESTAMP
+	`, blockID, day, seconds)
+	if err != nil {
+		return fmt.Errorf("erro ao registrar uso diário: %w", err)
+	}
+	return nil
+}
+
+// GetLimitStatus retorna a configuração e o consumo diário de um bloco.
+func (d *DB) GetLimitStatus(blockName string, day string) (*LimitStatus, error) {
+	var status LimitStatus
+	err := d.conn.QueryRow(`
+		SELECT
+			b.id,
+			b.name,
+			CASE WHEN ab.id IS NOT NULL THEN 1 ELSE 0 END AS active,
+			COALESCE(ab.locked, 0) AS locked,
+			COALESCE(dl.daily_seconds, 0) AS daily_seconds,
+			COALESCE(du.used_seconds, 0) AS used_seconds
+		FROM blocks b
+		LEFT JOIN active_blocks ab ON ab.block_id = b.id
+		LEFT JOIN daily_limits dl ON dl.block_id = b.id
+		LEFT JOIN daily_usage du ON du.block_id = b.id AND du.day = ?
+		WHERE b.name = ?
+	`, day, blockName).Scan(
+		&status.BlockID,
+		&status.BlockName,
+		&status.Active,
+		&status.Locked,
+		&status.DailyLimitSeconds,
+		&status.UsedSecondsToday,
+	)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("bloco '%s' não encontrado", blockName)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("erro ao buscar limite diário do bloco '%s': %w", blockName, err)
+	}
+
+	status.HasDailyLimit = status.DailyLimitSeconds > 0
+	return &status, nil
+}
+
+// ListLimitStatuses retorna todos os blocos que têm limite diário configurado.
+func (d *DB) ListLimitStatuses(day string) ([]LimitStatus, error) {
+	rows, err := d.conn.Query(`
+		SELECT
+			b.id,
+			b.name,
+			CASE WHEN ab.id IS NOT NULL THEN 1 ELSE 0 END AS active,
+			COALESCE(ab.locked, 0) AS locked,
+			dl.daily_seconds,
+			COALESCE(du.used_seconds, 0) AS used_seconds
+		FROM daily_limits dl
+		JOIN blocks b ON b.id = dl.block_id
+		LEFT JOIN active_blocks ab ON ab.block_id = b.id
+		LEFT JOIN daily_usage du ON du.block_id = b.id AND du.day = ?
+		ORDER BY b.name
+	`, day)
+	if err != nil {
+		return nil, fmt.Errorf("erro ao listar limites diários: %w", err)
+	}
+	defer rows.Close()
+
+	var statuses []LimitStatus
+	for rows.Next() {
+		var status LimitStatus
+		if err := rows.Scan(
+			&status.BlockID,
+			&status.BlockName,
+			&status.Active,
+			&status.Locked,
+			&status.DailyLimitSeconds,
+			&status.UsedSecondsToday,
+		); err != nil {
+			return nil, fmt.Errorf("erro ao ler limite diário: %w", err)
+		}
+		status.HasDailyLimit = true
+		statuses = append(statuses, status)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("erro ao iterar limites diários: %w", err)
+	}
+
+	return statuses, nil
 }
 
 // GetAllBlockedDomains retorna todos os domínios de todos os blocos ativos.

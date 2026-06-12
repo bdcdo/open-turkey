@@ -11,6 +11,8 @@ It organizes blocking into **blocks** — named groups of:
 
 When you **activate** a block, a daemon continuously ensures the blocking layers stay applied.
 
+Blocks can also have a **daily time limit**. A limited block stays available while it still has time left for the local day; Open Turkey monitors network traffic to the block's sites, counts traffic activity as usage, and automatically starts blocking the block once the daily quota is exhausted.
+
 ## How it works — 4 enforcement layers
 
 Open Turkey doesn't rely on a single, easily-bypassed mechanism. Each active block is enforced on four independent layers, and a `systemd` daemon re-applies them every 5 seconds if anything is tampered with:
@@ -106,7 +108,37 @@ Unlock a locked block (this also **deactivates** it):
 open-turkey unlock social-media
 ```
 
-### 3) Editing a block's lists
+### 3) Daily time limits
+
+Configure a block to allow up to 30 minutes of site traffic per local day:
+
+```bash
+open-turkey limit set social-media --daily 30m
+open-turkey start social-media --lock
+```
+
+With a daily limit configured, you do not need to run a command to unlock time. While the block is active and still has quota left, its sites remain available and Open Turkey installs firewall counting rules. When traffic to those sites is detected, the daemon counts the block as active for 60 seconds. New traffic extends that activity window; once the daily quota is exhausted, the normal blocking layers are applied until the next local day.
+
+Show limit usage:
+
+```bash
+open-turkey limit status
+open-turkey limit status social-media
+```
+
+Remove a limit:
+
+```bash
+open-turkey limit remove social-media
+```
+
+Notes:
+
+- The first version measures IPv4 network traffic, not browser tabs. Background traffic to a limited domain counts the same as deliberate use.
+- Daily limits are meant for site blocks. A limited block must contain at least one site.
+- Apps inside a limited block are allowed while the site quota remains and are killed once the quota is exhausted.
+
+### 4) Editing a block's lists
 
 Remove a domain from a block:
 
