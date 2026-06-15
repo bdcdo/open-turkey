@@ -63,6 +63,9 @@
 //     Isso é muito mais simples — não precisamos nos preocupar em mergear.
 //   - O Google Chrome usa um diretório diferente:
 //     /etc/opt/chrome/policies/managed/open-turkey.json
+//   - O Brave, também baseado em Chromium, usa um diretório próprio:
+//     /etc/brave/policies/managed/open-turkey.json
+//     (versões antigas liam /etc/chromium/, já coberto pelo arquivo acima).
 //
 // =============================================================================
 package blocker
@@ -99,6 +102,13 @@ const (
 	// no mesmo código. Isso acontece porque a instalação do Chrome coloca
 	// seus arquivos em /etc/opt/chrome/ em vez de /etc/chromium/.
 	chromePolicyPath = "/etc/opt/chrome/policies/managed/open-turkey.json"
+
+	// bravePolicyPath é o arquivo de políticas do Brave.
+	// O Brave é baseado em Chromium e usa o mesmo formato (URLBlocklist), mas
+	// migrou para um diretório próprio em /etc/brave/. Versões antigas do Brave
+	// liam /etc/chromium/policies/managed/, que já é coberto pelo arquivo do
+	// Chromium acima — por isso basta acrescentar este caminho.
+	bravePolicyPath = "/etc/brave/policies/managed/open-turkey.json"
 )
 
 // =============================================================================
@@ -143,6 +153,12 @@ func ApplyBrowserPolicies(domains []string) error {
 		return fmt.Errorf("erro ao aplicar política do Google Chrome: %w", err)
 	}
 
+	// Passo 5: Aplicar a política do Brave.
+	// O Brave também usa o formato do Chromium, em /etc/brave/.
+	if err := aplicarPoliticaChromium(bravePolicyPath, padroes); err != nil {
+		return fmt.Errorf("erro ao aplicar política do Brave: %w", err)
+	}
+
 	return nil
 }
 
@@ -174,6 +190,11 @@ func RemoveBrowserPolicies() error {
 	// Passo 3: Remover a política do Google Chrome.
 	if err := removerArquivoPolitica(chromePolicyPath); err != nil {
 		return fmt.Errorf("erro ao remover política do Google Chrome: %w", err)
+	}
+
+	// Passo 4: Remover a política do Brave.
+	if err := removerArquivoPolitica(bravePolicyPath); err != nil {
+		return fmt.Errorf("erro ao remover política do Brave: %w", err)
 	}
 
 	return nil
@@ -219,6 +240,14 @@ func IsBrowserPoliciesApplied(domains []string) bool {
 	dirChrome := filepath.Dir(chromePolicyPath)
 	if diretorioExiste(dirChrome) {
 		if !verificarPoliticaChromium(chromePolicyPath, padroesEsperados) {
+			return false
+		}
+	}
+
+	// Verificação do Brave:
+	dirBrave := filepath.Dir(bravePolicyPath)
+	if diretorioExiste(dirBrave) {
+		if !verificarPoliticaChromium(bravePolicyPath, padroesEsperados) {
 			return false
 		}
 	}
@@ -653,6 +682,16 @@ func extrairStringsDeInterface(valor interface{}) []string {
 // Essa heurística não é perfeita (o diretório pode existir sem o navegador,
 // ou o navegador pode estar instalado sem o diretório), mas é suficiente
 // para o nosso propósito.
+//
+// Detalhe importante para quem for mexer aqui: depois do primeiro start, os
+// diretórios da família Chromium (Chromium, Chrome, Brave) passam a existir
+// mesmo sem o navegador instalado, porque aplicarPoliticaChromium os cria com
+// os.MkdirAll de propósito — assim a política já fica pronta caso o usuário
+// instale o navegador depois. Isso NÃO enfraquece IsBrowserPoliciesApplied:
+// como o apply também grava o arquivo, a presença do diretório passa a casar
+// com a presença do arquivo correto, e o único jeito de ter "diretório existe
+// mas arquivo ausente/divergente" é adulteração — exatamente o que o daemon
+// deve detectar e reaplicar.
 func diretorioExiste(caminho string) bool {
 	info, err := os.Stat(caminho)
 	if err != nil {
