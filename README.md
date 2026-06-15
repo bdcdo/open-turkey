@@ -17,7 +17,7 @@ Open Turkey doesn't rely on a single, easily-bypassed mechanism. Each active blo
 
 1. **`/etc/hosts`** — resolves blocked domains to `0.0.0.0` (affects every program, not just browsers).
 2. **Firewall (iptables)** — blocks network connections to the blocked sites.
-3. **Browser enterprise policies** — managed `URLBlocklist`/`WebsiteFilter` policies for Firefox, Chromium and Google Chrome. The user cannot disable these from inside the browser, not even in private/incognito mode.
+3. **Browser enterprise policies** — managed `URLBlocklist`/`WebsiteFilter` policies for Firefox, Chromium, Google Chrome and Brave. The user cannot disable these from inside the browser, not even in private/incognito mode.
 4. **Process kill** — terminates blocked apps that are running (SIGKILL).
 
 Because the hosts and firewall layers act below the browser, blocking works even for browsers installed via Snap or Flatpak (where the system-wide browser policy file may not be read).
