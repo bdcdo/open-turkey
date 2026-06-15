@@ -682,6 +682,16 @@ func extrairStringsDeInterface(valor interface{}) []string {
 // Essa heurística não é perfeita (o diretório pode existir sem o navegador,
 // ou o navegador pode estar instalado sem o diretório), mas é suficiente
 // para o nosso propósito.
+//
+// Detalhe importante para quem for mexer aqui: depois do primeiro start, os
+// diretórios da família Chromium (Chromium, Chrome, Brave) passam a existir
+// mesmo sem o navegador instalado, porque aplicarPoliticaChromium os cria com
+// os.MkdirAll de propósito — assim a política já fica pronta caso o usuário
+// instale o navegador depois. Isso NÃO enfraquece IsBrowserPoliciesApplied:
+// como o apply também grava o arquivo, a presença do diretório passa a casar
+// com a presença do arquivo correto, e o único jeito de ter "diretório existe
+// mas arquivo ausente/divergente" é adulteração — exatamente o que o daemon
+// deve detectar e reaplicar.
 func diretorioExiste(caminho string) bool {
 	info, err := os.Stat(caminho)
 	if err != nil {
