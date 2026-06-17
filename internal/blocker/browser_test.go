@@ -37,10 +37,10 @@ func TestNormalizarDominio(t *testing.T) {
 	}
 }
 
-// TestGerarPadroesURL valida a geração dos padrões *://.../* a partir dos
-// domínios: os dois padrões por domínio (raiz e wildcard de subdomínio), o
+// TestGerarPadroesFirefox valida os match-patterns *://.../* do WebsiteFilter
+// do Firefox: os dois padrões por domínio (raiz e wildcard de subdomínio), o
 // colapso do prefixo "www.", a deduplicação e o resultado ordenado.
-func TestGerarPadroesURL(t *testing.T) {
+func TestGerarPadroesFirefox(t *testing.T) {
 	casos := []struct {
 		nome     string
 		dominios []string
@@ -80,9 +80,72 @@ func TestGerarPadroesURL(t *testing.T) {
 
 	for _, c := range casos {
 		t.Run(c.nome, func(t *testing.T) {
-			obtido := gerarPadroesURL(c.dominios)
+			obtido := gerarPadroesFirefox(c.dominios)
 			if !reflect.DeepEqual(obtido, c.esperado) {
-				t.Errorf("gerarPadroesURL(%v) = %v; esperado %v", c.dominios, obtido, c.esperado)
+				t.Errorf("gerarPadroesFirefox(%v) = %v; esperado %v", c.dominios, obtido, c.esperado)
+			}
+		})
+	}
+}
+
+// TestGerarFiltrosChromium valida os filtros do URLBlocklist (Chromium/Chrome/
+// Brave): um filtro bare por domínio, prefixo "www." removido, deduplicação e
+// ordenação. O caso "uol.com.br" é o de regressão do bug que deixava a Folha
+// (folha.uol.com.br, subdomínio) passar — o filtro bare "uol.com.br" cobre
+// todos os subdomínios no navegador, sem precisar de curinga.
+func TestGerarFiltrosChromium(t *testing.T) {
+	casos := []struct {
+		nome     string
+		dominios []string
+		esperado []string
+	}{
+		{
+			nome:     "dominio raiz vira filtro bare",
+			dominios: []string{"facebook.com"},
+			esperado: []string{"facebook.com"},
+		},
+		{
+			nome:     "prefixo www e removido (bare cobre subdominios)",
+			dominios: []string{"www.facebook.com"},
+			esperado: []string{"facebook.com"},
+		},
+		{
+			nome:     "raiz e www deduplicam no mesmo filtro bare",
+			dominios: []string{"facebook.com", "www.facebook.com"},
+			esperado: []string{"facebook.com"},
+		},
+		{
+			nome:     "regressao folha: bloquear uol.com.br cobre o subdominio",
+			dominios: []string{"uol.com.br"},
+			esperado: []string{"uol.com.br"},
+		},
+		{
+			nome:     "url completa e normalizada para o host bare",
+			dominios: []string{"https://www.uol.com.br/folha"},
+			esperado: []string{"uol.com.br"},
+		},
+		{
+			nome:     "varios dominios saem ordenados",
+			dominios: []string{"reddit.com", "globo.com"},
+			esperado: []string{"globo.com", "reddit.com"},
+		},
+		{
+			nome:     "entradas vazias sao ignoradas",
+			dominios: []string{"", "   "},
+			esperado: []string{},
+		},
+		{
+			nome:     "sem dominios resulta em lista vazia",
+			dominios: nil,
+			esperado: []string{},
+		},
+	}
+
+	for _, c := range casos {
+		t.Run(c.nome, func(t *testing.T) {
+			obtido := gerarFiltrosChromium(c.dominios)
+			if !reflect.DeepEqual(obtido, c.esperado) {
+				t.Errorf("gerarFiltrosChromium(%v) = %v; esperado %v", c.dominios, obtido, c.esperado)
 			}
 		})
 	}
