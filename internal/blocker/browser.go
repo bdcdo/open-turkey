@@ -117,45 +117,47 @@ const (
 
 // ApplyBrowserPolicies cria as políticas de bloqueio para todos os navegadores.
 //
-// Para cada domínio fornecido, cria dois padrões de URL:
-//   - *://*.dominio.com/*  → bloqueia qualquer subdomínio (www, m, app, etc.)
-//   - *://dominio.com/*    → bloqueia o domínio raiz
+// ATENÇÃO — Firefox e Chromium usam formatos de padrão DIFERENTES, e tratá-los
+// como iguais já causou bug em produção (subdomínios como folha.uol.com.br
+// passavam pelo Brave/Chrome). Por isso geramos DOIS conjuntos:
 //
-// Por que dois padrões? Porque "facebook.com" e "www.facebook.com" são URLs
-// diferentes. O asterisco no protocolo (*://) cobre tanto http quanto https.
-// O asterisco no final (/*) garante que qualquer página dentro do site seja
-// bloqueada, não apenas a página inicial.
+//   - Firefox (WebsiteFilter): match-patterns no estilo "*://*.dominio.com/*".
+//     O asterisco no protocolo cobre http/https, o "*." cobre subdomínios e o
+//     "/*" cobre qualquer caminho. Ver gerarPadroesFirefox.
 //
-// Exemplo: para o domínio "facebook.com", os padrões seriam:
-//   - *://*.facebook.com/*  → bloqueia www.facebook.com, m.facebook.com, etc.
-//   - *://facebook.com/*    → bloqueia facebook.com diretamente
+//   - Chromium/Chrome/Brave (URLBlocklist): o formato é
+//     "[scheme://][.]host[:port][/path][@query]" e NÃO aceita curingas como
+//     "*://*.host/*" — filtros malformados são descartados em silêncio. Aqui um
+//     filtro simples "dominio.com" já casa o domínio raiz E todos os subdomínios
+//     E todos os caminhos. Ver gerarFiltrosChromium.
+//     Ref.: https://www.chromium.org/administrators/url-blocklist-filter-format/
 func ApplyBrowserPolicies(domains []string) error {
-	// Passo 1: Montar a lista de padrões de URL a partir dos domínios.
-	// Cada domínio gera dois padrões — um para subdomínios e outro para o domínio raiz.
-	padroes := gerarPadroesURL(domains)
+	// Passo 1: Montar os padrões/filtros — um conjunto por formato.
+	padroesFirefox := gerarPadroesFirefox(domains)
+	filtrosChromium := gerarFiltrosChromium(domains)
 
 	// Passo 2: Aplicar a política do Firefox.
 	// O Firefox usa um formato próprio com "WebsiteFilter" dentro de "policies".
 	// Como o arquivo pode já existir com outras políticas, fazemos merge.
-	if err := aplicarPoliticaFirefox(padroes); err != nil {
+	if err := aplicarPoliticaFirefox(padroesFirefox); err != nil {
 		return fmt.Errorf("erro ao aplicar política do Firefox: %w", err)
 	}
 
 	// Passo 3: Aplicar a política do Chromium.
 	// O Chromium usa "URLBlocklist" e aceita arquivos separados por política.
-	if err := aplicarPoliticaChromium(chromiumPolicyPath, padroes); err != nil {
+	if err := aplicarPoliticaChromium(chromiumPolicyPath, filtrosChromium); err != nil {
 		return fmt.Errorf("erro ao aplicar política do Chromium: %w", err)
 	}
 
 	// Passo 4: Aplicar a política do Google Chrome.
 	// O Chrome usa o mesmo formato do Chromium, mas em diretório diferente.
-	if err := aplicarPoliticaChromium(chromePolicyPath, padroes); err != nil {
+	if err := aplicarPoliticaChromium(chromePolicyPath, filtrosChromium); err != nil {
 		return fmt.Errorf("erro ao aplicar política do Google Chrome: %w", err)
 	}
 
 	// Passo 5: Aplicar a política do Brave.
 	// O Brave também usa o formato do Chromium, em /etc/brave/.
-	if err := aplicarPoliticaChromium(bravePolicyPath, padroes); err != nil {
+	if err := aplicarPoliticaChromium(bravePolicyPath, filtrosChromium); err != nil {
 		return fmt.Errorf("erro ao aplicar política do Brave: %w", err)
 	}
 
@@ -210,10 +212,14 @@ func RemoveBrowserPolicies() error {
 // Isso é importante para detectar se alguém editou manualmente os arquivos
 // de política tentando burlar o bloqueio.
 func IsBrowserPoliciesApplied(domains []string) bool {
-	// Montamos os padrões esperados a partir dos domínios.
-	padroesEsperados := gerarPadroesURL(domains)
+	// Montamos os padrões/filtros esperados — um conjunto por formato, igual
+	// ao que ApplyBrowserPolicies grava. Conferir o Chromium contra o formato
+	// do Firefox (ou vice-versa) faria o daemon achar que a política está
+	// sempre divergente e reaplicá-la a cada 5s sem necessidade.
+	padroesFirefox := gerarPadroesFirefox(domains)
+	filtrosChromium := gerarFiltrosChromium(domains)
 
-	if len(padroesEsperados) == 0 {
+	if len(padroesFirefox) == 0 || len(filtrosChromium) == 0 {
 		return false
 	}
 
@@ -222,7 +228,7 @@ func IsBrowserPoliciesApplied(domains []string) bool {
 	// o que indica que o Firefox está instalado no sistema.
 	dirFirefox := filepath.Dir(firefoxPolicyPath)
 	if diretorioExiste(dirFirefox) {
-		if !verificarPoliticaFirefox(padroesEsperados) {
+		if !verificarPoliticaFirefox(padroesFirefox) {
 			return false
 		}
 	}
@@ -231,7 +237,7 @@ func IsBrowserPoliciesApplied(domains []string) bool {
 	// Mesmo raciocínio — só verificamos se o diretório pai existe.
 	dirChromium := filepath.Dir(chromiumPolicyPath)
 	if diretorioExiste(dirChromium) {
-		if !verificarPoliticaChromium(chromiumPolicyPath, padroesEsperados) {
+		if !verificarPoliticaChromium(chromiumPolicyPath, filtrosChromium) {
 			return false
 		}
 	}
@@ -239,7 +245,7 @@ func IsBrowserPoliciesApplied(domains []string) bool {
 	// Verificação do Google Chrome:
 	dirChrome := filepath.Dir(chromePolicyPath)
 	if diretorioExiste(dirChrome) {
-		if !verificarPoliticaChromium(chromePolicyPath, padroesEsperados) {
+		if !verificarPoliticaChromium(chromePolicyPath, filtrosChromium) {
 			return false
 		}
 	}
@@ -247,7 +253,7 @@ func IsBrowserPoliciesApplied(domains []string) bool {
 	// Verificação do Brave:
 	dirBrave := filepath.Dir(bravePolicyPath)
 	if diretorioExiste(dirBrave) {
-		if !verificarPoliticaChromium(bravePolicyPath, padroesEsperados) {
+		if !verificarPoliticaChromium(bravePolicyPath, filtrosChromium) {
 			return false
 		}
 	}
@@ -259,18 +265,33 @@ func IsBrowserPoliciesApplied(domains []string) bool {
 // Funções auxiliares — geração de padrões de URL
 // =============================================================================
 
-// gerarPadroesURL converte uma lista de domínios em padrões de URL para bloqueio.
+// removerPrefixoWWW remove o "www." inicial de um host, mas só quando sobra um
+// domínio com pelo menos dois rótulos. Sem essa guarda, um host de rótulo único
+// como "www.com" (domínio registrável real) viraria "com" — e o filtro bare do
+// Chromium / o curinga "*://*.com/*" do Firefox passariam a casar TODO o ".com".
+func removerPrefixoWWW(host string) string {
+	semWWW := strings.TrimPrefix(host, "www.")
+	if strings.Contains(semWWW, ".") {
+		return semWWW
+	}
+	return host
+}
+
+// gerarPadroesFirefox converte domínios em match-patterns para a política
+// WebsiteFilter do Firefox.
 //
 // Para cada domínio, gera dois padrões:
 //   - *://*.dominio.com/*  → subdomínios (www, m, app, etc.)
 //   - *://dominio.com/*    → domínio raiz
 //
-// O formato *://.../* é o padrão usado tanto pelo Firefox (WebsiteFilter)
-// quanto pelo Chromium (URLBlocklist). Funciona assim:
+// O formato *://.../* é o esperado pelo WebsiteFilter do Firefox:
 //   - *://  → qualquer protocolo (http, https, etc.)
 //   - *.    → qualquer subdomínio
 //   - /*    → qualquer caminho dentro do site
-func gerarPadroesURL(domains []string) []string {
+//
+// IMPORTANTE: esse formato NÃO vale para o URLBlocklist do Chromium/Chrome/Brave
+// (que descarta esses curingas) — para essa família, use gerarFiltrosChromium.
+func gerarPadroesFirefox(domains []string) []string {
 	conjunto := make(map[string]bool)
 
 	for _, dominio := range domains {
@@ -284,10 +305,7 @@ func gerarPadroesURL(domains []string) []string {
 
 		// Padrão 2: bloqueia subdomínios. Se o host começa com "www.",
 		// geramos o wildcard em cima do host sem www (evita "*.www.*").
-		base := host
-		if strings.HasPrefix(base, "www.") {
-			base = strings.TrimPrefix(base, "www.")
-		}
+		base := removerPrefixoWWW(host)
 		conjunto[fmt.Sprintf("*://*.%s/*", base)] = true
 	}
 
@@ -297,6 +315,44 @@ func gerarPadroesURL(domains []string) []string {
 	}
 	sort.Strings(padroes)
 	return padroes
+}
+
+// gerarFiltrosChromium converte domínios em filtros do formato URLBlocklist,
+// usado por Chromium, Google Chrome e Brave.
+//
+// O URLBlocklist NÃO usa match-pattern como o Firefox. O formato é
+// "[scheme://][.]host[:port][/path][@query]" e um filtro simples como
+// "uol.com.br" já casa o domínio raiz E todos os subdomínios (www, m,
+// folha, ...) E todos os caminhos. Curingas como "*://*.host/*" são INVÁLIDOS
+// e o navegador os descarta em silêncio — foi esse o bug que deixava
+// subdomínios (ex.: folha.uol.com.br) passarem mesmo com uol.com.br bloqueado.
+// Ref.: https://www.chromium.org/administrators/url-blocklist-filter-format/
+//
+// Por isso geramos UM filtro por domínio, sempre o host-base: removemos um
+// eventual prefixo "www." porque o filtro bare já cobre raiz e subdomínios,
+// e um "." inicial restringiria justamente o que queremos pegar.
+func gerarFiltrosChromium(domains []string) []string {
+	conjunto := make(map[string]bool)
+
+	for _, dominio := range domains {
+		host := NormalizarDominio(dominio)
+		if host == "" {
+			continue
+		}
+
+		// O filtro bare "dominio.com" já cobre "www.dominio.com" e demais
+		// subdomínios, então normalizamos removendo o "www." da entrada.
+		host = removerPrefixoWWW(host)
+
+		conjunto[host] = true
+	}
+
+	filtros := make([]string, 0, len(conjunto))
+	for f := range conjunto {
+		filtros = append(filtros, f)
+	}
+	sort.Strings(filtros)
+	return filtros
 }
 
 func NormalizarDominio(entrada string) string {
@@ -469,11 +525,13 @@ func removerPoliticaFirefox() error {
 	return gravarJSON(firefoxPolicyPath, politicaRaiz)
 }
 
-// verificarPoliticaFirefox verifica se o arquivo de políticas do Firefox
-// contém TODOS os padrões de URL esperados no array WebsiteFilter.Block.
+// verificarPoliticaFirefox verifica se o array WebsiteFilter.Block do arquivo
+// de políticas do Firefox contém EXATAMENTE os padrões esperados.
 //
-// Retorna true somente se TODOS os padrões estão presentes.
-// Se faltar qualquer um, retorna false.
+// Como ApplyBrowserPolicies sobrescreve o Block por inteiro, o estado correto é
+// igualdade de conjunto: nem padrão faltando, nem padrão a mais. Se houver
+// divergência em qualquer direção (inclusive entrada extra/adulterada), retorna
+// false para o daemon reaplicar.
 func verificarPoliticaFirefox(padroesEsperados []string) bool {
 	// Ler e decodificar o arquivo de políticas.
 	conteudo, err := os.ReadFile(firefoxPolicyPath)
@@ -499,42 +557,30 @@ func verificarPoliticaFirefox(padroesEsperados []string) bool {
 
 	blocksExistentes := extrairStringsDeInterface(websiteFilter["Block"])
 
-	// Montar um conjunto com os bloqueios existentes para busca rápida.
-	conjuntoBloqueios := make(map[string]bool)
-	for _, b := range blocksExistentes {
-		conjuntoBloqueios[b] = true
-	}
-
-	// Verificar se TODOS os padrões esperados estão presentes.
-	for _, padrao := range padroesEsperados {
-		if !conjuntoBloqueios[padrao] {
-			return false
-		}
-	}
-
-	return true
+	return mesmoConjunto(blocksExistentes, padroesEsperados)
 }
 
 // =============================================================================
 // Funções auxiliares — Chromium / Google Chrome
 // =============================================================================
 
-// aplicarPoliticaChromium cria o arquivo de política para Chromium ou Chrome.
+// aplicarPoliticaChromium cria o arquivo de política para Chromium, Chrome
+// ou Brave (mesmo formato URLBlocklist, diretórios diferentes).
 //
-// O formato é mais simples que o Firefox:
+// O formato é mais simples que o Firefox — um filtro bare por domínio, que já
+// cobre raiz, subdomínios e caminhos (ver gerarFiltrosChromium):
 //
 //	{
 //	    "URLBlocklist": [
-//	        "*://*.facebook.com/*",
-//	        "*://facebook.com/*"
+//	        "facebook.com"
 //	    ]
 //	}
 //
 // Como usamos um arquivo separado (open-turkey.json), não precisamos nos
 // preocupar com merge — simplesmente sobrescrevemos o arquivo.
 //
-// O parâmetro caminhoArquivo permite reutilizar essa função para Chromium
-// e Chrome, que usam diretórios diferentes mas o mesmo formato.
+// O parâmetro caminhoArquivo permite reutilizar essa função para Chromium,
+// Chrome e Brave, que usam diretórios diferentes mas o mesmo formato.
 func aplicarPoliticaChromium(caminhoArquivo string, padroes []string) error {
 	// Passo 1: Criar o diretório de políticas se não existir.
 	// Se o diretório pai não existe, provavelmente o navegador não está
@@ -555,8 +601,13 @@ func aplicarPoliticaChromium(caminhoArquivo string, padroes []string) error {
 	return gravarJSON(caminhoArquivo, politica)
 }
 
-// verificarPoliticaChromium verifica se o arquivo de políticas do Chromium/Chrome
-// contém TODOS os padrões de URL esperados no array URLBlocklist.
+// verificarPoliticaChromium verifica se o array URLBlocklist do arquivo de
+// políticas do Chromium/Chrome/Brave contém EXATAMENTE os filtros esperados.
+//
+// O open-turkey.json é um arquivo exclusivamente nosso, sobrescrito por inteiro
+// a cada ApplyBrowserPolicies. Por isso o estado correto é igualdade de conjunto:
+// qualquer divergência (filtro faltando OU entrada extra/adulterada) retorna
+// false para o daemon reaplicar.
 func verificarPoliticaChromium(caminhoArquivo string, padroesEsperados []string) bool {
 	conteudo, err := os.ReadFile(caminhoArquivo)
 	if err != nil {
@@ -570,20 +621,7 @@ func verificarPoliticaChromium(caminhoArquivo string, padroesEsperados []string)
 
 	blocksExistentes := extrairStringsDeInterface(politica["URLBlocklist"])
 
-	// Montar um conjunto com os bloqueios existentes.
-	conjuntoBloqueios := make(map[string]bool)
-	for _, b := range blocksExistentes {
-		conjuntoBloqueios[b] = true
-	}
-
-	// Verificar se TODOS os padrões esperados estão presentes.
-	for _, padrao := range padroesEsperados {
-		if !conjuntoBloqueios[padrao] {
-			return false
-		}
-	}
-
-	return true
+	return mesmoConjunto(blocksExistentes, padroesEsperados)
 }
 
 // =============================================================================
@@ -673,6 +711,29 @@ func extrairStringsDeInterface(valor interface{}) []string {
 	}
 
 	return resultado
+}
+
+// mesmoConjunto retorna true se os dois slices contêm o MESMO conjunto de
+// strings, ignorando ordem e duplicatas. Como os esperados já vêm deduplicados
+// e ordenados dos geradores, basta comparar o tamanho do conjunto existente com
+// o número de esperados e confirmar que todo esperado está presente.
+func mesmoConjunto(existentes, esperados []string) bool {
+	conjuntoExistente := make(map[string]bool, len(existentes))
+	for _, e := range existentes {
+		conjuntoExistente[e] = true
+	}
+
+	if len(conjuntoExistente) != len(esperados) {
+		return false
+	}
+
+	for _, e := range esperados {
+		if !conjuntoExistente[e] {
+			return false
+		}
+	}
+
+	return true
 }
 
 // diretorioExiste verifica se um diretório existe no sistema de arquivos.
