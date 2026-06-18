@@ -67,6 +67,11 @@ func TestGerarPadroesFirefox(t *testing.T) {
 			esperado: []string{"*://*.facebook.com/*", "*://facebook.com/*"},
 		},
 		{
+			nome:     "www em dominio de label unico nao vira curinga do TLD",
+			dominios: []string{"www.com"},
+			esperado: []string{"*://*.www.com/*", "*://www.com/*"},
+		},
+		{
 			nome:     "entradas vazias sao ignoradas",
 			dominios: []string{"", "   "},
 			esperado: []string{},
@@ -123,6 +128,11 @@ func TestGerarFiltrosChromium(t *testing.T) {
 			nome:     "url completa e normalizada para o host bare",
 			dominios: []string{"https://www.uol.com.br/folha"},
 			esperado: []string{"uol.com.br"},
+		},
+		{
+			nome:     "www em dominio de label unico nao vira o TLD inteiro",
+			dominios: []string{"www.com"},
+			esperado: []string{"www.com"},
 		},
 		{
 			nome:     "varios dominios saem ordenados",
