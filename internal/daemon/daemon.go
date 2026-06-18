@@ -21,8 +21,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/brunodcdo/open-turkey/internal/blocker"
 	"github.com/brunodcdo/open-turkey/internal/db"
+	"github.com/brunodcdo/open-turkey/internal/enforcer"
 )
 
 // Run \u00e9 a fun\u00e7\u00e3o principal do daemon. Ela inicia o loop de fiscaliza\u00e7\u00e3o
@@ -89,91 +89,9 @@ func Run() error {
 
 // enforce executa um \u00fanico ciclo de fiscaliza\u00e7\u00e3o.
 //
-// Essa fun\u00e7\u00e3o \u00e9 o n\u00facleo do daemon. Ela verifica se cada camada de bloqueio
-// est\u00e1 corretamente aplicada e, caso n\u00e3o esteja, reaplica.
-//
-// As camadas verificadas s\u00e3o:
-//   - /etc/hosts: bloqueia dom\u00ednios resolvendo para 127.0.0.1
-//   - Firewall (iptables): bloqueia conex\u00f5es de rede para os dom\u00ednios
-//   - Pol\u00edticas de navegador: impede acesso via Chrome/Firefox policies
-//   - Processos: mata aplicativos bloqueados que estejam rodando
-//
-// Importante: se uma camada falhar, as outras ainda s\u00e3o verificadas.
-// Isso garante m\u00e1xima resili\u00eancia \u2014 um erro no iptables n\u00e3o deve
-// impedir o bloqueio via /etc/hosts, por exemplo.
+// O enforcer contabiliza uso de blocos limitados, decide quais blocos devem
+// ficar apenas monitorados e reaplica as camadas de bloqueio quando a cota acaba
+// ou quando o bloco n\u00e3o tem limite diário.
 func enforce(database *db.DB) error {
-	// Buscamos todos os bloqueios ativos no banco de dados.
-	// Um bloqueio est\u00e1 ativo se o hor\u00e1rio atual est\u00e1 dentro do per\u00edodo configurado.
-	activeBlocks, err := database.GetActiveBlocks()
-	if err != nil {
-		return err
-	}
-
-	// Se n\u00e3o houver bloqueios ativos, garantimos que todas as camadas
-	// est\u00e3o removidas (estado limpo). Isso evita que regras orf\u00e3s
-	// fiquem penduradas ap\u00f3s o t\u00e9rmino de um bloqueio.
-	if len(activeBlocks) == 0 {
-		// Removemos cada camada individualmente para garantir estado limpo.
-		blocker.RemoveHosts()
-		blocker.RemoveFirewall()
-		blocker.RemoveBrowserPolicies()
-		return nil
-	}
-
-	// Coletamos todos os dom\u00ednios e aplicativos de todos os bloqueios ativos.
-	// V\u00e1rios bloqueios podem estar ativos ao mesmo tempo (ex: "redes sociais"
-	// e "jogos"), ent\u00e3o precisamos unificar as listas.
-	var domains []string
-	var apps []string
-
-	for _, block := range activeBlocks {
-		domains = append(domains, block.Sites...)
-		apps = append(apps, block.Apps...)
-	}
-
-	// --- Camada 1: /etc/hosts ---
-	// Verificamos se os dom\u00ednios j\u00e1 est\u00e3o mapeados para 127.0.0.1 no /etc/hosts.
-	// Se algu\u00e9m editou o arquivo manualmente para remover as entradas, reaplicamos.
-	if !blocker.IsHostsApplied(domains) {
-		log.Println("daemon: /etc/hosts desatualizado, reaplicando bloqueios")
-		if err := blocker.ApplyHosts(domains); err != nil {
-			// Logamos o erro mas continuamos para as pr\u00f3ximas camadas.
-			log.Printf("daemon: erro ao aplicar /etc/hosts: %v", err)
-		}
-	}
-
-	// --- Camada 2: Firewall (iptables) ---
-	// Verificamos se as regras de firewall est\u00e3o presentes.
-	// Se algu\u00e9m executou "iptables -F" para limpar as regras, reaplicamos.
-	if !blocker.IsFirewallApplied() {
-		log.Println("daemon: regras de firewall ausentes, reaplicando")
-		if err := blocker.ApplyFirewall(domains); err != nil {
-			log.Printf("daemon: erro ao aplicar firewall: %v", err)
-		}
-	}
-
-	// --- Camada 3: Pol\u00edticas de navegador ---
-	// Verificamos se as pol\u00edticas do Chrome/Firefox est\u00e3o configuradas.
-	// Essas pol\u00edticas impedem o acesso mesmo se o usu\u00e1rio usar DNS alternativo.
-	if !blocker.IsBrowserPoliciesApplied(domains) {
-		log.Println("daemon: pol\u00edticas de navegador desatualizadas, reaplicando")
-		if err := blocker.ApplyBrowserPolicies(domains); err != nil {
-			log.Printf("daemon: erro ao aplicar pol\u00edticas de navegador: %v", err)
-		}
-	}
-
-	// --- Camada 4: Matar processos bloqueados ---
-	// Procuramos por processos de aplicativos bloqueados e os encerramos.
-	// Isso impede o uso de apps como jogos ou redes sociais no desktop.
-	if len(apps) > 0 {
-		killed, err := blocker.KillBlocked(apps)
-		if err != nil {
-			log.Printf("daemon: erro ao matar processos bloqueados: %v", err)
-		}
-		if killed > 0 {
-			log.Printf("daemon: %d processos bloqueados encerrados", killed)
-		}
-	}
-
-	return nil
+	return enforcer.AccountAndApply(database, time.Now())
 }

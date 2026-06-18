@@ -60,6 +60,7 @@ import (
 	"fmt"
 	"net"
 	"os/exec"
+	"strconv"
 	"strings"
 )
 
@@ -68,6 +69,16 @@ import (
 // inspecione as regras do iptables saiba que essas regras pertencem
 // ao Open Turkey. O hífen é permitido em nomes de chains.
 const chainName = "OPEN-TURKEY"
+
+// limitChainPrefix identifica chains usadas apenas para contar uso de blocos
+// com limite diário. Elas não bloqueiam tráfego; só incrementam contadores.
+const limitChainPrefix = "OT-LIMIT-"
+
+// LimitTrackTarget descreve um bloco limitado que deve ter tráfego monitorado.
+type LimitTrackTarget struct {
+	BlockID int
+	Domains []string
+}
 
 // dohServersIPv4 contém os endereços IPv4 dos servidores DNS-over-HTTPS
 // mais utilizados. Bloqueamos esses IPs na porta 443 (HTTPS) para impedir
@@ -226,6 +237,86 @@ func RemoveFirewall() error {
 	return nil
 }
 
+// ApplyLimitTracking instala chains de contagem para blocos com limite diário.
+func ApplyLimitTracking(targets []LimitTrackTarget) error {
+	if len(targets) == 0 {
+		return RemoveLimitTracking()
+	}
+
+	desired := make(map[string]bool)
+	for _, target := range targets {
+		if target.BlockID <= 0 {
+			continue
+		}
+
+		chain := limitChainName(target.BlockID)
+		desired[chain] = true
+
+		_ = runIptables("-N", chain)
+		if err := runIptables("-F", chain); err != nil {
+			return fmt.Errorf("erro ao limpar a chain %s: %w", chain, err)
+		}
+		if err := ensureOutputJump(chain); err != nil {
+			return err
+		}
+
+		for _, ip := range resolveDomainsIPv4(target.Domains) {
+			if err := runIptables("-A", chain, "-d", ip, "-j", "RETURN"); err != nil {
+				return fmt.Errorf("erro ao adicionar regra de contagem para %s: %w", ip, err)
+			}
+		}
+	}
+
+	existing, err := listLimitChains()
+	if err != nil {
+		return err
+	}
+	for _, chain := range existing {
+		if !desired[chain] {
+			removeLimitChain(chain)
+		}
+	}
+
+	return nil
+}
+
+// RemoveLimitTracking remove todas as chains de contagem de uso diário.
+func RemoveLimitTracking() error {
+	chains, err := listLimitChains()
+	if err != nil {
+		return err
+	}
+	for _, chain := range chains {
+		removeLimitChain(chain)
+	}
+	return nil
+}
+
+// ReadLimitTrackingCounters soma os pacotes observados por bloco limitado.
+func ReadLimitTrackingCounters() (map[int]uint64, error) {
+	counters := make(map[int]uint64)
+
+	chains, err := listLimitChains()
+	if err != nil {
+		return counters, err
+	}
+
+	for _, chain := range chains {
+		blockID, ok := parseLimitChainID(chain)
+		if !ok {
+			continue
+		}
+
+		output, err := runIptablesOutput("-L", chain, "-v", "-x", "-n")
+		if err != nil {
+			return counters, err
+		}
+		counters[blockID] = parsePacketCounter(output)
+	}
+
+	return counters, nil
+}
+
 // IsFirewallApplied verifica se o firewall do Open Turkey está ativo.
 //
 // Para considerar o firewall como "aplicado", duas condições precisam
@@ -292,6 +383,94 @@ func BlockDoH() error {
 // =============================================================================
 // Funções auxiliares (helpers) — uso interno do pacote
 // =============================================================================
+
+func ensureOutputJump(chain string) error {
+	if err := runIptables("-C", "OUTPUT", "-j", chain); err == nil {
+		return nil
+	}
+	if err := runIptables("-I", "OUTPUT", "-j", chain); err != nil {
+		return fmt.Errorf("erro ao inserir salto para a chain %s na OUTPUT: %w", chain, err)
+	}
+	return nil
+}
+
+func removeLimitChain(chain string) {
+	_ = runIptables("-D", "OUTPUT", "-j", chain)
+	_ = runIptables("-F", chain)
+	_ = runIptables("-X", chain)
+}
+
+func listLimitChains() ([]string, error) {
+	output, err := runIptablesOutput("-S")
+	if err != nil {
+		return nil, err
+	}
+
+	var chains []string
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && fields[0] == "-N" && strings.HasPrefix(fields[1], limitChainPrefix) {
+			chains = append(chains, fields[1])
+		}
+	}
+	return chains, nil
+}
+
+func limitChainName(blockID int) string {
+	return fmt.Sprintf("%s%d", limitChainPrefix, blockID)
+}
+
+func parseLimitChainID(chain string) (int, bool) {
+	if !strings.HasPrefix(chain, limitChainPrefix) {
+		return 0, false
+	}
+	id, err := strconv.Atoi(strings.TrimPrefix(chain, limitChainPrefix))
+	if err != nil || id <= 0 {
+		return 0, false
+	}
+	return id, true
+}
+
+func resolveDomainsIPv4(domains []string) []string {
+	seen := make(map[string]bool)
+	var ips []string
+
+	for _, domain := range domains {
+		domain = NormalizarDominio(domain)
+		if domain == "" {
+			continue
+		}
+
+		resolved, err := net.LookupHost(domain)
+		if err != nil {
+			continue
+		}
+		for _, ip := range resolved {
+			if strings.Contains(ip, ":") || seen[ip] {
+				continue
+			}
+			seen[ip] = true
+			ips = append(ips, ip)
+		}
+	}
+
+	return ips
+}
+
+func parsePacketCounter(output string) uint64 {
+	var total uint64
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		packets, err := strconv.ParseUint(fields[0], 10, 64)
+		if err == nil {
+			total += packets
+		}
+	}
+	return total
+}
 
 // runIptables executa um comando iptables com os argumentos fornecidos.
 //
